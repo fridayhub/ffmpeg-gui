@@ -1,17 +1,24 @@
 use chrono::Local;
 use eframe::egui;
 use egui::{FontDefinitions, FontFamily, FontId};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::BufRead;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+#[derive(Serialize, Deserialize, Default)]
+struct AppConfig {
+    output_dir: String,
+}
+
 struct VideoProcessor {
     // 文件参数
     source_paths: Vec<String>,
     output_dir: String,
     output_template: String,
+    config_path: String,
 
     // 处理参数
     start_time: String,
@@ -47,27 +54,52 @@ struct BatchTask {
     rotation: i32,
 }
 
+impl VideoProcessor {
+    fn load_config(&mut self) {
+        let config_path = Path::new(&self.config_path);
+        if config_path.exists() {
+            if let Ok(config_str) = fs::read_to_string(config_path) {
+                if let Ok(config) = serde_json::from_str::<AppConfig>(&config_str) {
+                    self.output_dir = config.output_dir;
+                }
+            }
+        }
+    }
+
+    fn save_config(&self) {
+        let config = AppConfig {
+            output_dir: self.output_dir.clone(),
+        };
+        if let Ok(config_str) = serde_json::to_string_pretty(&config) {
+            let _ = fs::create_dir_all(Path::new(&self.config_path).parent().unwrap());
+            let _ = fs::write(&self.config_path, config_str);
+        }
+    }
+}
+
 impl Default for VideoProcessor {
     fn default() -> Self {
-        Self {
+        let config_path = format!("{}/.config/ffmpeg-gui.config", env!("HOME"));
+        let mut processor = Self {
             source_paths: Vec::new(),
             output_dir: "output".to_string(),
             output_template: "{input_name}_processed_{rotation}_{timestamp}".to_string(),
+            config_path,
             start_time: "0:00:00".to_owned(),
             end_time: "0:00:00".to_owned(),
             rotation: 0,
             batch_queue: Vec::new(),
             processing: false,
             state: ProcessingState::default(),
-
-            // 初始化预览相关字段 (preview_time tracks start_time by default)
             preview_texture: None,
-            preview_time: "0:00:00".to_owned(), // Match start_time's initial value
+            preview_time: "0:00:00".to_owned(),
             preview_loading: false,
             current_preview_frame: Arc::new(Mutex::new(None)),
-            last_preview_request_time: 0.0, // 初始化为0
-            preview_thread: None,           // 初始为空线程句柄
-        }
+            last_preview_request_time: 0.0,
+            preview_thread: None,
+        };
+        processor.load_config();
+        processor
     }
 }
 
@@ -286,6 +318,7 @@ impl VideoProcessor {
             if ui.button("选择...").clicked() {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                     self.output_dir = dir.display().to_string();
+                    self.save_config();
                 }
             }
         });
