@@ -278,17 +278,22 @@ impl VideoProcessor {
     }
 
     fn file_management_panel(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::both()
-            .max_height(300.0) // Fixed height scroll area
-            .show(ui, |ui| {
-                egui::Grid::new("file_grid").num_columns(3).show(ui, |ui| {
+        // 顶部固定区域
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
                     ui.label("已选文件:");
                     ui.label(format!("{} 个文件", self.source_paths.len()));
-                    if ui.button("清空列表").clicked() {
-                        self.source_paths.clear();
-                    }
-                    ui.end_row();
-
+                });
+                if ui.button("清空列表").clicked() {
+                    self.source_paths.clear();
+                }
+            });
+        });
+        egui::ScrollArea::both()
+            .max_height(100.0) // Fixed height scroll area
+            .show(ui, |ui| {
+                egui::Grid::new("file_grid").num_columns(3).show(ui, |ui| {
                     let mut paths_to_remove = Vec::new();
                     for path in &self.source_paths {
                         // ui.label(Path::new(path).file_name().unwrap().to_str().unwrap());
