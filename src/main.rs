@@ -31,11 +31,15 @@ struct VideoProcessor {
     state: ProcessingState,
 
     // 新增预览相关字段
-    preview_texture: Option<egui::TextureHandle>, // 预览纹理
-    preview_time: String,                         // 预览时间点
-    preview_loading: bool,                        // 加载状态
-    current_preview_frame: Arc<Mutex<Option<Vec<u8>>>>, // 共享预览帧数据
-    last_preview_request_time: f64,               // 上次预览请求时间(用于防抖)
+    start_preview_texture: Option<egui::TextureHandle>, // 开始时间预览纹理
+    end_preview_texture: Option<egui::TextureHandle>,   // 结束时间预览纹理
+    start_preview_time: String,                         // 开始时间预览点
+    end_preview_time: String,                           // 结束时间预览点
+    start_preview_loading: bool,                        // 开始时间加载状态
+    end_preview_loading: bool,                          // 结束时间加载状态
+    current_start_preview_frame: Arc<Mutex<Option<Vec<u8>>>>, // 共享开始时间预览帧数据
+    current_end_preview_frame: Arc<Mutex<Option<Vec<u8>>>>, // 共享结束时间预览帧数据
+    last_preview_request_time: f64,                     // 上次预览请求时间(用于防抖)
     preview_thread: Option<std::thread::JoinHandle<()>>, // 预览线程句柄
 }
 
@@ -91,10 +95,14 @@ impl Default for VideoProcessor {
             batch_queue: Vec::new(),
             processing: false,
             state: ProcessingState::default(),
-            preview_texture: None,
-            preview_time: "0:00:00".to_owned(),
-            preview_loading: false,
-            current_preview_frame: Arc::new(Mutex::new(None)),
+            start_preview_texture: None,
+            end_preview_texture: None,
+            start_preview_time: "0:00:00".to_owned(),
+            end_preview_time: "0:00:00".to_owned(),
+            start_preview_loading: false,
+            end_preview_loading: false,
+            current_start_preview_frame: Arc::new(Mutex::new(None)),
+            current_end_preview_frame: Arc::new(Mutex::new(None)),
             last_preview_request_time: 0.0,
             preview_thread: None,
         };
@@ -155,8 +163,11 @@ fn load_image(data: &[u8]) -> Option<egui::ColorImage> {
 
 impl VideoProcessor {
     // 预览生成方法
-    fn generate_preview(&mut self, ctx: &egui::Context) {
-        if self.source_paths.is_empty() || self.preview_loading {
+    fn generate_preview(&mut self, ctx: &egui::Context, is_start_time: bool) {
+        if self.source_paths.is_empty()
+            || (is_start_time && self.start_preview_loading)
+            || (!is_start_time && self.end_preview_loading)
+        {
             return;
         }
 
@@ -174,10 +185,22 @@ impl VideoProcessor {
 
         let input_path = self.source_paths[0].clone();
         let rotation = self.rotation;
-        let time = self.preview_time.clone();
-        let frame = self.current_preview_frame.clone();
+        let time = if is_start_time {
+            self.start_preview_time.clone()
+        } else {
+            self.end_preview_time.clone()
+        };
+        let frame = if is_start_time {
+            self.current_start_preview_frame.clone()
+        } else {
+            self.current_end_preview_frame.clone()
+        };
 
-        self.preview_loading = true;
+        if is_start_time {
+            self.start_preview_loading = true;
+        } else {
+            self.end_preview_loading = true;
+        }
 
         // 异步生成预览
         let ctx = ctx.clone();
@@ -218,49 +241,106 @@ impl VideoProcessor {
 
     // 在UI布局中增加预览面板
     fn preview_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.horizontal(|ui| {
-            ui.label("预览时间点 (HH:MM:SS):");
-            ui.text_edit_singleline(&mut self.preview_time);
+        // 开始时间预览部分
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label("开始时间预览 (HH:MM:SS):");
+                ui.text_edit_singleline(&mut self.start_preview_time);
 
-            // 生成预览按钮
-            if ui.button("🔄 生成预览").clicked() {
-                self.generate_preview(ctx);
+                // 生成预览按钮
+                if ui.button("🔄 生成预览").clicked() {
+                    self.generate_preview(ctx, true);
+                }
+            });
+
+            // 显示加载状态
+            if self.start_preview_loading {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("正在生成开始时间预览...");
+                });
+            }
+
+            // 显示预览图像
+            if let Some(texture) = &self.start_preview_texture {
+                let size = texture.size_vec2();
+                let aspect_ratio = size.x / size.y;
+                let max_width = 800.0;
+                let max_height = 350.0;
+
+                let (width, height) = if aspect_ratio > max_width / max_height {
+                    (max_width, max_width / aspect_ratio)
+                } else {
+                    (max_height * aspect_ratio, max_height)
+                };
+
+                ui.image(texture, [width, height]);
             }
         });
 
-        // 显示加载状态
-        if self.preview_loading {
+        // 分隔线
+        ui.separator();
+
+        // 结束时间预览部分
+        ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("正在生成预览...");
-            });
-        }
+                ui.label("结束时间预览 (HH:MM:SS):");
+                ui.text_edit_singleline(&mut self.end_preview_time);
 
-        // 显示预览图像
-        if let Some(texture) = &self.preview_texture {
-            let size = texture.size_vec2();
-            let aspect_ratio = size.x / size.y;
-            let max_width = 800.0;
-            let max_height = 700.0;
-
-            let (width, height) = if aspect_ratio > max_width / max_height {
-                (max_width, max_width / aspect_ratio)
-            } else {
-                (max_height * aspect_ratio, max_height)
-            };
-
-            ui.image(texture, [width, height]);
-        }
-        // 异步更新纹理 - 只在有新帧数据时更新
-        if let Ok(mut frame) = self.current_preview_frame.try_lock() {
-            if let Some(img_data) = frame.take() {
-                // 使用take()获取并清空数据
-                if let Some(image) = load_image(&img_data) {
-                    self.preview_texture =
-                        Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
-                    ctx.request_repaint(); // 主动请求重绘
+                // 生成预览按钮
+                if ui.button("🔄 生成预览").clicked() {
+                    self.generate_preview(ctx, false);
                 }
-                self.preview_loading = false;
+            });
+
+            // 显示加载状态
+            if self.end_preview_loading {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("正在生成结束时间预览...");
+                });
+            }
+
+            // 显示预览图像
+            if let Some(texture) = &self.end_preview_texture {
+                let size = texture.size_vec2();
+                let aspect_ratio = size.x / size.y;
+                let max_width = 800.0;
+                let max_height = 350.0;
+
+                let (width, height) = if aspect_ratio > max_width / max_height {
+                    (max_width, max_width / aspect_ratio)
+                } else {
+                    (max_height * aspect_ratio, max_height)
+                };
+
+                ui.image(texture, [width, height]);
+            }
+        });
+
+        // 异步更新纹理 - 只在有新帧数据时更新
+        if let Ok(mut frame) = self.current_start_preview_frame.try_lock() {
+            if let Some(img_data) = frame.take() {
+                if let Some(image) = load_image(&img_data) {
+                    self.start_preview_texture = Some(ctx.load_texture(
+                        "start_preview",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    ctx.request_repaint();
+                }
+                self.start_preview_loading = false;
+            }
+        }
+
+        if let Ok(mut frame) = self.current_end_preview_frame.try_lock() {
+            if let Some(img_data) = frame.take() {
+                if let Some(image) = load_image(&img_data) {
+                    self.end_preview_texture =
+                        Some(ctx.load_texture("end_preview", image, egui::TextureOptions::LINEAR));
+                    ctx.request_repaint();
+                }
+                self.end_preview_loading = false;
             }
         }
     }
@@ -310,10 +390,11 @@ impl VideoProcessor {
 
     fn settings_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.label("参数设置");
-        // 当start_time改变时，如果preview_time未被手动修改过，则同步更新preview_time
+        // 当start_time改变时，如果start_preview_time未被手动修改过，则同步更新start_preview_time
         let old_start_time = self.start_time.clone();
         let old_end_time = self.end_time.clone();
-        let old_preview_time = self.preview_time.clone();
+        let old_start_preview_time = self.start_preview_time.clone();
+        let old_end_preview_time = self.end_preview_time.clone();
         let old_rotation = self.rotation.clone();
 
         // 输出目录
@@ -359,14 +440,20 @@ impl VideoProcessor {
                 });
         });
 
-        // 如果start_time或end_time或rotation 被修改且preview_time未被手动修改过，则同步更新preview_time并生成预览
-        if (self.start_time != old_start_time
-            || self.end_time != old_end_time
-            || self.rotation != old_rotation)
-            && self.preview_time == old_preview_time
+        // 如果start_time或rotation被修改且start_preview_time未被手动修改过，则同步更新start_preview_time并生成预览
+        if (self.start_time != old_start_time || self.rotation != old_rotation)
+            && self.start_preview_time == old_start_preview_time
         {
-            self.preview_time = self.start_time.clone();
-            self.generate_preview(ctx);
+            self.start_preview_time = self.start_time.clone();
+            self.generate_preview(ctx, true);
+        }
+
+        // 如果end_time或rotation被修改且end_preview_time未被手动修改过，则同步更新end_preview_time并生成预览
+        if (self.end_time != old_end_time || self.rotation != old_rotation)
+            && self.end_preview_time == old_end_preview_time
+        {
+            self.end_preview_time = self.end_time.clone();
+            self.generate_preview(ctx, false);
         }
     }
 
@@ -613,6 +700,7 @@ fn setup_fonts(ctx: &egui::Context) {
     .into();
     ctx.set_style(style);
 }
+
 fn main() {
     // Load window icon
     let icon = {
