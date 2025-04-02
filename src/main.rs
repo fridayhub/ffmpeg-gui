@@ -614,9 +614,22 @@ fn setup_fonts(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 fn main() {
+    // Load window icon
+    let icon = {
+        let icon_bytes = include_bytes!("../icons8-ffmpeg-48.png");
+        let image = image::load_from_memory(icon_bytes).expect("Failed to load icon");
+        let rgba = image.to_rgba8();
+        eframe::IconData {
+            rgba: rgba.to_vec(),
+            width: image.width(),
+            height: image.height(),
+        }
+    };
+
     let options = eframe::NativeOptions {
         initial_window_size: Some(egui::vec2(1200.0, 800.0)),
         // resizable: false,
+        icon_data: Some(icon),
         ..Default::default()
     };
     let _ = eframe::run_native(
