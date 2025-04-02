@@ -1,0 +1,10 @@
+# mv ffmpeg-gui.desktop ~/.local/share/applications/
+# chmod +x ~/.local/share/applications/ffmpeg-gui.desktop
+[Desktop Entry]
+Name=应用程序名称  # 应用程序的名字
+Comment=应用程序描述  # 对应用程序的简短描述
+Exec=/path/to/your/application  # 应用程序执行路径
+Icon=/path/to/icon.png  # 图标路径，可以是绝对路径也可以是主题图标名
+Terminal=false  # 是否在终端中运行应用，默认为false
+Type=Application  # 类型，通常是Application
+Categories=Utility;Application;  # 分类，帮助系统更好地组织应用
