@@ -44,6 +44,11 @@ struct VideoProcessor {
     current_end_preview_frame: Arc<Mutex<Option<Vec<u8>>>>, // 共享结束时间预览帧数据
     last_preview_request_time: f64,                     // 上次预览请求时间(用于防抖)
     preview_thread: Option<std::thread::JoinHandle<()>>, // 预览线程句柄
+
+    // 视频基本信息
+    video_duration: String,
+    video_size: String,
+    video_format: String,
 }
 
 #[derive(Clone, Default)]
@@ -108,6 +113,9 @@ impl Default for VideoProcessor {
             current_end_preview_frame: Arc::new(Mutex::new(None)),
             last_preview_request_time: 0.0,
             preview_thread: None,
+            video_duration: "".to_string(),
+            video_size: "".to_string(),
+            video_format: "".to_string(),
         };
         processor.load_config();
         processor
@@ -139,6 +147,9 @@ impl eframe::App for VideoProcessor {
             // 文件管理区域
             self.file_management_panel(ui);
 
+            // 视频基本信息
+            self.video_info_panel(ui);
+
             // 参数设置
             self.settings_panel(ui, ctx);
 
@@ -162,6 +173,67 @@ fn load_image(data: &[u8]) -> Option<egui::ColorImage> {
         size,
         pixels.as_slice(),
     ))
+}
+
+// ffprobe 并解析其输出以获取视频的基本信息
+fn get_video_info(path: &str) -> (String, String, String) {
+    // 验证文件存在
+    if !Path::new(path).exists() {
+        eprintln!("文件不存在: {}", path);
+        return ("".into(), "".into(), "".into());
+    }
+
+    // 执行命令
+    let output = Command::new("ffprobe")
+        .args(&[
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration,codec_name",
+            "-show_entries",
+            "format=size",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("执行 ffprobe 失败");
+
+    // 打印调试信息
+    println!("Exit Status: {}", output.status);
+    println!("stdout:\n{}", String::from_utf8_lossy(&output.stdout));
+    println!("stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    // 解析结果
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.trim().lines().collect();
+        if lines.len() >= 3 {
+            let duration_sec = lines[1].parse::<f64>().unwrap_or(0.0);
+            let size = lines[2].parse::<usize>().unwrap_or(0);
+            let codec_name = lines[0].to_string();
+            // let duration_str = format!("{:.2} 秒", duration_sec);
+            let size_str = format!("{:.2} MB", size as f64 / (1024.0 * 1024.0));
+            return (format_duration(duration_sec), size_str, codec_name);
+        }
+    }
+
+    ("".into(), "".into(), "".into())
+}
+
+fn format_duration(seconds: f64) -> String {
+    let total = seconds as u64;
+    let hours = total / 3600;
+    let remaining = total % 3600;
+    let minutes = remaining / 60;
+    let seconds = remaining % 60;
+
+    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
 }
 
 impl VideoProcessor {
@@ -354,7 +426,11 @@ impl VideoProcessor {
             if let Some(path) = &file.path {
                 let path_str = path.display().to_string();
                 if !self.source_paths.contains(&path_str) {
-                    self.source_paths.push(path_str);
+                    self.source_paths.push(path_str.clone());
+                    let (duration, size, format) = get_video_info(&path_str);
+                    self.video_duration = duration;
+                    self.video_size = size;
+                    self.video_format = format;
                 }
             }
         }
@@ -391,8 +467,19 @@ impl VideoProcessor {
             });
     }
 
+    fn video_info_panel(&self, ui: &mut egui::Ui) {
+        if self.source_paths.is_empty() {
+            ui.label("尚未选择任何视频文件。");
+        } else {
+            ui.heading("视频基本信息");
+            ui.label(format!("视频长度: {}", self.video_duration));
+            ui.label(format!("视频大小: {}", self.video_size));
+            ui.label(format!("视频格式: {}", self.video_format));
+        }
+    }
+
     fn settings_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.label("参数设置");
+        ui.heading("参数设置");
         // 当start_time改变时，如果start_preview_time未被手动修改过，则同步更新start_preview_time
         let old_start_time = self.start_time.clone();
         let old_end_time = self.end_time.clone();
@@ -799,7 +886,7 @@ fn main() {
     };
 
     let options = eframe::NativeOptions {
-        initial_window_size: Some(egui::vec2(1200.0, 800.0)),
+        initial_window_size: Some(egui::vec2(1600.0, 1000.0)),
         // resizable: false,
         icon_data: Some(icon),
         ..Default::default()
