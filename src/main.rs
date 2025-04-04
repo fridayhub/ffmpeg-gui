@@ -1,11 +1,14 @@
 use chrono::Local;
+use chrono::NaiveTime;
 use eframe::egui;
 use egui::{FontDefinitions, FontFamily, FontId};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::BufRead;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 #[derive(Serialize, Deserialize, Default)]
@@ -27,7 +30,7 @@ struct VideoProcessor {
 
     // 状态管理
     batch_queue: Vec<BatchTask>,
-    processing: bool,
+    processing: Arc<Mutex<bool>>,
     state: ProcessingState,
 
     // 新增预览相关字段
@@ -93,7 +96,7 @@ impl Default for VideoProcessor {
             end_time: "0:00:00".to_owned(),
             rotation: 0,
             batch_queue: Vec::new(),
-            processing: false,
+            processing: Arc::new(Mutex::new(false)),
             state: ProcessingState::default(),
             start_preview_texture: None,
             end_preview_texture: None,
@@ -211,7 +214,7 @@ impl VideoProcessor {
             let mut args = vec!["-ss", &time, "-i", &input_path];
 
             // 仅当旋转角度非0时添加旋转滤镜
-            let rotation_filter = format!("rotate={}*PI/180", rotation);
+            let rotation_filter = format!("rotate=-{}*PI/180", rotation);
             if rotation != 0 {
                 args.extend_from_slice(&["-vf", &rotation_filter]);
             }
@@ -459,14 +462,24 @@ impl VideoProcessor {
 
     fn process_control(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("开始处理").clicked() && !self.processing {
+            // 通过块作用域限制锁的生命周期
+            let processing = {
+                let lock = self.processing.lock().unwrap();
+                *lock
+            };
+            // 开始处理按钮
+            if ui
+                .add_enabled(!processing, egui::Button::new("开始处理"))
+                .clicked()
+            {
                 self.prepare_batch_tasks();
-                self.processing = true;
                 let state = self.state.clone();
                 let tasks = self.batch_queue.clone();
+                let processing_flag = self.processing.clone();
 
                 // 启动处理线程
                 std::thread::spawn(move || {
+                    *processing_flag.lock().unwrap() = true;
                     for task in tasks {
                         *state.message.lock().unwrap() = format!("处理中: {}", task.input_path);
                         if let Err(e) = process_task(task, &state) {
@@ -474,13 +487,16 @@ impl VideoProcessor {
                             break;
                         }
                     }
+                    // 处理完成后更新状态
                     *state.message.lock().unwrap() = "处理完成".to_string();
+
                     *state.progress.lock().unwrap() = 0.0;
+                    *processing_flag.lock().unwrap() = false; // 关键修改点
                 });
             }
 
             if ui.button("停止").clicked() {
-                self.processing = false;
+                *self.processing.lock().unwrap() = false;
             }
         });
     }
@@ -498,14 +514,14 @@ impl VideoProcessor {
             .source_paths
             .iter()
             .map(|input_path| {
-                let output_path = generate_output_path(
+                let (output_path, new_input_path) = generate_output_path(
                     input_path,
                     &self.output_dir,
                     &self.output_template,
                     self.rotation,
                 );
                 BatchTask {
-                    input_path: input_path.clone(),
+                    input_path: new_input_path.clone(),
                     output_path,
                     start_time: self.start_time.clone(), // 携带处理参数
                     end_time: self.end_time.clone(),
@@ -516,14 +532,63 @@ impl VideoProcessor {
     }
 }
 
+// 清理文件名中的多余点
+fn sanitize_filename(filename: &str) -> String {
+    // 正则表达式匹配非中文、字母、数字、下划线的字符
+    let re = Regex::new(r"[^A-Za-z0-9_\.\/\u{4e00}-\u{9fff}]+").unwrap();
+    let reg_filename = re.replace_all(filename, "").to_string();
+
+    // 分离文件名和扩展名
+    let (stem, extension) = reg_filename.rsplit_once('.').unwrap_or((&reg_filename, ""));
+
+    // 处理主文件名部分
+    let sanitized_stem = stem
+        .chars()
+        .filter(|&c| c != '.' || c == '.') // 保留第一个点（如果有）
+        .collect::<String>()
+        .replace(".", ""); // 去掉所有点
+
+    // 重新组合
+    if extension.is_empty() {
+        sanitized_stem
+    } else {
+        format!("{}.{}", sanitized_stem, extension)
+    }
+}
+
+// 重命名文件（实际文件操作）
+fn rename_file(path: &Path) -> std::io::Result<PathBuf> {
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid filename"))?;
+
+    let new_name = sanitize_filename(filename);
+    let new_path = path.with_file_name(new_name);
+
+    if path != new_path {
+        std::fs::rename(path, &new_path)?;
+    }
+
+    Ok(new_path)
+}
+
 fn generate_output_path(
     input_path: &str,
     output_dir: &str,
     template: &str,
     rotation: i32,
-) -> String {
+) -> (String, String) {
     let now = Local::now();
-    let input_path = Path::new(input_path);
+    let mut input_path = PathBuf::from(input_path);
+
+    match rename_file(&input_path) {
+        Ok(new_path) => {
+            println!("重命名成功: {:?}", new_path);
+            input_path = new_path;
+        }
+        Err(e) => eprintln!("错误: {}", e),
+    }
 
     let replacements = [
         (
@@ -550,7 +615,20 @@ fn generate_output_path(
     }
 
     let output_path = Path::new(output_dir).join(filename);
-    output_path.to_string_lossy().into_owned()
+    // 正则表达式匹配非中文、字母、数字、下划线的字符
+    let re = Regex::new(r"[^A-Za-z0-9_\.\/\u{4e00}-\u{9fff}]+").unwrap();
+    (
+        re.replace_all(&output_path.to_string_lossy().into_owned(), "")
+            .to_string(),
+        input_path.to_string_lossy().into_owned(),
+    )
+}
+
+fn compare_times(time1: &str, time2: &str) -> std::cmp::Ordering {
+    let time1 = NaiveTime::from_str(time1).unwrap();
+    let time2 = NaiveTime::from_str(time2).unwrap();
+
+    time1.cmp(&time2)
 }
 
 fn process_task(task: BatchTask, state: &ProcessingState) -> Result<(), String> {
@@ -570,21 +648,27 @@ fn process_task(task: BatchTask, state: &ProcessingState) -> Result<(), String> 
     cmd.arg("-i").arg(&task.input_path);
 
     // 添加时间裁剪参数
-    if !task.start_time.is_empty() {
-        cmd.arg("-ss").arg(&task.start_time);
-    }
-    if !task.end_time.is_empty() {
-        cmd.arg("-to").arg(&task.end_time);
+    match compare_times(&task.start_time, &task.end_time) {
+        std::cmp::Ordering::Less => {
+            cmd.arg("-ss").arg(&task.start_time);
+            cmd.arg("-to").arg(&task.end_time);
+
+            // 添加输出参数
+            cmd.args(&["-c:v", "copy", "-c:a", "copy"])
+                .arg(&task.output_path);
+        }
+        _ => {}
     }
 
     // 添加旋转元数据
     if task.rotation != 0 {
-        cmd.args(&["-metadata:s:v", &task.rotation.to_string()]);
+        // let rotation_filter = ;
+        cmd.args(&["-metadata:s:v"]);
+        cmd.args(&[format!("rotate={}", task.rotation)]);
+        cmd.args(&["-codec", "copy"]).arg(&task.output_path);
     }
 
-    // 添加输出参数
-    cmd.args(&["-c:v", "copy", "-c:a", "copy"])
-        .arg(&task.output_path);
+    println!("最终FFmpeg命令: {:?}", cmd.get_args().collect::<Vec<_>>());
 
     // 启动子进程
     let mut child = cmd.spawn().map_err(|e| format!("启动FFmpeg失败: {}", e))?;
