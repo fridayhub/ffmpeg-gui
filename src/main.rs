@@ -314,6 +314,25 @@ impl VideoProcessor {
         }));
     }
 
+    // 新增清空预览状态的方法
+    fn clear_previews(&mut self) {
+        // 重置开始时间预览
+        self.start_preview_texture = None;
+        self.start_preview_loading = false;
+        self.start_preview_time.clear();
+        if let Ok(mut frame) = self.current_start_preview_frame.try_lock() {
+            *frame = None;
+        }
+
+        // 重置结束时间预览
+        self.end_preview_texture = None;
+        self.end_preview_loading = false;
+        self.end_preview_time.clear();
+        if let Ok(mut frame) = self.current_end_preview_frame.try_lock() {
+            *frame = None;
+        }
+    }
+
     // 在UI布局中增加预览面板
     fn preview_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         // 开始时间预览部分
@@ -446,6 +465,7 @@ impl VideoProcessor {
                 });
                 if ui.button("清空列表").clicked() {
                     self.source_paths.clear();
+                    self.clear_previews(); // 新增清空预览方法
                 }
             });
         });
